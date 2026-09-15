@@ -1,0 +1,89 @@
+version: '3.8'
+
+# FUUDELIVERY PRODUCTION STACK
+# Engenheiro: AI Assistant | Data: 2023-10-27
+# Stack: PHP 8.2-FPM, Nginx (Reverse Proxy + WAF rules), PostgreSQL 16 (ACID + RLS), Redis (Cache/Sessions)
+
+services:
+  # BANCO DE DADOS - O Coração do Sistema
+  db:
+    image: postgres:16-alpine
+    container_name: fuud_db_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/master_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    networks:
+      - fuud_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # BACKEND API - Processamento Seguro
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.php
+    container_name: fuud_api_prod
+    restart: always
+    environment:
+      APP_ENV: production
+      DB_HOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      JWT_SECRET: ${JWT_SECRET}
+      MP_ACCESS_TOKEN: ${MP_ACCESS_TOKEN}
+      BITPAY_KEY: ${BITPAY_KEY}
+    volumes:
+      - ./api:/var/www/html/api
+      - ./shared:/var/www/html/shared
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - fuud_internal
+      - fuud_web
+
+  # WEB SERVER / REVERSE PROXY
+  web:
+    image: nginx:alpine
+    container_name: fuud_web_prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./apps:/var/www/html/apps
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+    networks:
+      - fuud_web
+      - fuud_internal
+
+  # CACHE & FILAS (Opcional para sessões e rate limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: fuud_redis_prod
+    restart: always
+    networks:
+      - fuud_internal
+
+volumes:
+  pg_data:
+    driver: local
+
+networks:
+  fuud_internal:
+    driver: bridge
+    internal: true # Isolamento total: DB e Redis não acessíveis externamente
+  fuud_web:
+    driver: bridge
