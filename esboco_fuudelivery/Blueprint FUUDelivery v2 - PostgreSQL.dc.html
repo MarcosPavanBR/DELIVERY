@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet" />
+<style>
+doc-page:not(:defined){visibility:hidden}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,sans-serif;color:#1b1a18}
+a{color:#b4161d;text-decoration:underline;text-underline-offset:2px}
+a:hover{color:#7d0f14}
+pre{orphans:2;widows:2}
+</style>
+<script src="./doc-page.js"></script>
+</helmet>
+<doc-page margin="0.7in">
+<div slot="header" style="display:flex;justify-content:space-between;align-items:baseline;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8b8781;border-bottom:1px solid #e0ddd6;padding-bottom:6px;font-weight:500">
+<span>FUUDelivery · Blueprint v2</span>
+<span>Camada de dados: PostgreSQL 16</span>
+</div>
+<div slot="footer" style="display:flex;justify-content:space-between;font-size:9px;color:#8b8781;border-top:1px solid #e0ddd6;padding-top:6px">
+<span>Documento interno de arquitetura</span>
+<span>Revisão 2.0</span>
+</div>
+
+<h1 style="font-family:'Newsreader',Georgia,serif;font-size:34px;line-height:1.12;font-weight:600;margin:0 0 10px;letter-spacing:-0.01em">Blueprint FUUDelivery v2 — pagamentos híbridos sobre PostgreSQL</h1>
+<p style="font-size:15px;line-height:1.6;color:#57534c;margin:0 0 6px;max-width:40em">Revisão crítica do plano original (Svelte · Bootstrap · PHP · Cloudflare · Mercado Pago · BitPay) com a camada de dados reescrita de MySQL para PostgreSQL. O que estava certo permaneceu; o que era frágil foi corrigido e está justificado abaixo.</p>
+<p style="font-size:11px;line-height:1.5;color:#8b8781;margin:0 0 26px;font-family:'IBM Plex Mono',monospace">Stack confirmada por scan do painel · PostgreSQL substitui MySQL/MariaDB em todas as seções</p>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">1. O que muda em relação ao plano v1</h2>
+<p style="font-size:14.5px;line-height:1.62;margin:8px 0 14px;max-width:40em">Dez correções. As cinco primeiras são de integridade financeira — sem elas o restaurante cobra duas vezes ou entrega comida de graça.</p>
+
+<table style="width:100%;border-collapse:collapse;font-size:12.5px;line-height:1.5;margin:0 0 24px">
+<thead>
+<tr style="background:#f4f2ee">
+<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #d4d0c7;font-weight:600;width:27%">Ponto do v1</th>
+<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #d4d0c7;font-weight:600;width:36%">Problema</th>
+<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #d4d0c7;font-weight:600">Correção no v2</th>
+</tr>
+</thead>
+<tbody>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Idempotência com <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">SELECT</code> + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">INSERT</code> e HTTP 409</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Corrida entre duas abas: os dois <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">SELECT</code> passam antes dos <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">INSERT</code>. E 409 em retry de rede faz o cliente pagar sem saber o resultado.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Chave única + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">INSERT … ON CONFLICT DO NOTHING</code>; a resposta é <em>cacheada</em> e reenviada com 200. Seção 4.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Status do pedido em uma única coluna</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Sem histórico de transição e sem trava: dois atendentes aprovam o mesmo comprovante.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Máquina de estados em função SQL + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">SELECT … FOR UPDATE</code> e tabela append-only <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">order_events</code>.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500"><code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">application_fee</code> com Access Token do restaurante</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Mistura os dois modelos. White-label (token dele) não comporta comissão; split exige OAuth/Connect e token da plataforma.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Escolher um por restaurante: coluna <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">settlement_mode</code> ('white_label' | 'split'), com credenciais em tabela separada.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Access Token em <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">restaurants</code></td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Segredo de terceiro em texto claro na tabela mais lida do sistema; qualquer <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">SELECT *</code> vaza.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Tabela <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">restaurant_credentials</code> com <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pgcrypto</code>, chave fora do banco, RLS negando por padrão.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Webhook do Mercado Pago ausente</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">O v1 confia só na resposta síncrona. Pagamento <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">in_process</code> que aprova depois nunca chega à cozinha.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0"><code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">api/mp_webhook.php</code> como fonte da verdade, com validação de assinatura e reconciliação.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Marca d'água no cliente</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Canvas no navegador é decoração — o fraudador sobe o que quiser direto no endpoint.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Marca d'água só server-side (GD/Imagick) + hash perceptual do arquivo para detectar reuso de print.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Comprovantes em <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">../proofs/</code></td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Dentro do webroot: URL adivinhável expõe dado bancário de terceiro (LGPD).</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Object storage privado (R2/S3) com URL assinada de 5 min; no banco só a chave e o hash.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Cron de 15 min para cancelar</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Dois workers no mesmo minuto cancelam o mesmo pedido duas vezes.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0"><code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_cron</code> + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_try_advisory_lock</code>; prazo gravado em <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">verification_deadline</code>.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">"WebSocket/SSE" para a cozinha</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">PHP não mantém socket; e notificar fora da transação perde eventos em rollback.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Padrão outbox + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">LISTEN/NOTIFY</code> nativo do Postgres alimentando um SSE. Seção 5.</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">jQuery em até 3 arquivos</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Regra sem prazo é dívida permanente; zoom de imagem não precisa de jQuery.</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Congelar no legado do painel, proibir no PWA novo, remover até a semana 8.</td></tr>
+</tbody>
+</table>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">2. Por que PostgreSQL muda o desenho (e não só o DDL)</h2>
+<p style="font-size:14.5px;line-height:1.62;margin:8px 0 14px;max-width:40em">Trocar o banco só vale se a aplicação usar o que ele tem. Cinco recursos removem código PHP:</p>
+<ul style="font-size:14px;line-height:1.62;margin:0 0 20px;padding-left:20px;max-width:41em">
+<li style="margin-bottom:5px"><strong>Índice único parcial</strong> — "um pagamento aprovado por pedido" passa a ser uma restrição do banco, não um <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">if</code> em PHP.</li>
+<li style="margin-bottom:5px"><strong><code style="font-family:'IBM Plex Mono',monospace;font-size:12px">LISTEN/NOTIFY</code></strong> — tempo real para KDS e painel sem Redis nem servidor de socket.</li>
+<li style="margin-bottom:5px"><strong><code style="font-family:'IBM Plex Mono',monospace;font-size:12px">jsonb</code></strong> — resposta crua do Mercado Pago/BitPay guardada inteira e consultável, essencial em disputa.</li>
+<li style="margin-bottom:5px"><strong>Row-Level Security</strong> — isolamento por restaurante no banco: um bug de <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">WHERE</code> deixa de virar vazamento entre lojas.</li>
+<li style="margin-bottom:5px"><strong><code style="font-family:'IBM Plex Mono',monospace;font-size:12px">numeric</code> + transações reais em DDL</strong> — dinheiro exato e migração atômica (no MySQL o <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">ALTER</code> não faz rollback).</li>
+</ul>
+<div style="break-inside:avoid;background:#fbf9f5;border:1px solid #e0ddd6;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#57534c;margin:0 0 24px">
+<strong style="color:#1b1a18">Decisão explícita:</strong> <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">ENUM</code> nativo do Postgres só para conjuntos estáveis (<code style="font-family:'IBM Plex Mono',monospace;font-size:12px">payment_method</code>). Status de pedido usa <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">text</code> + <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">CHECK</code>, porque adicionar valor a enum trava DDL em tabela grande e remover valor é impossível.
+</div>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">3. Esquema PostgreSQL (migração 001)</h2>
+<pre style="break-inside:avoid;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:1.52;background:#f7f5f1;border:1px solid #e3e0d9;padding:12px 14px;margin:10px 0 6px;white-space:pre-wrap;overflow-wrap:break-word">CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid + criptografia
+CREATE EXTENSION IF NOT EXISTS citext;     -- e-mail case-insensitive
+
+CREATE TYPE payment_method AS ENUM
+  ('mp_card','pix_manual','cash','physical_machine','bitpay');
+CREATE TYPE settlement_mode AS ENUM ('white_label','split');
+
+CREATE TABLE restaurants (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             text NOT NULL,
+  city_ibge_code   char(7) NOT NULL,
+  settlement       settlement_mode NOT NULL DEFAULT 'white_label',
+  platform_fee_bps int NOT NULL DEFAULT 0 CHECK (platform_fee_bps BETWEEN 0 AND 3000),
+  pix_key          text,
+  is_open          boolean NOT NULL DEFAULT false,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+-- Segredos isolados: nunca em SELECT * de restaurants
+CREATE TABLE restaurant_credentials (
+  restaurant_id    uuid PRIMARY KEY REFERENCES restaurants(id) ON DELETE CASCADE,
+  mp_public_key    text,
+  mp_access_token  bytea,          -- pgp_sym_encrypt(token, :key)
+  mp_collector_id  text,
+  bitpay_token     bytea,
+  rotated_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE orders (
+  id             bigserial PRIMARY KEY,
+  public_code    text NOT NULL UNIQUE DEFAULT upper(substr(encode(gen_random_bytes(4),'hex'),1,8)),
+  user_id        uuid NOT NULL REFERENCES users(id),
+  restaurant_id  uuid NOT NULL REFERENCES restaurants(id),
+  status         text NOT NULL DEFAULT 'cart' CHECK (status IN (
+                   'cart','pending_payment','pending_verification','paid',
+                   'preparing','ready','delivering','delivered',
+                   'rejected','cancelled','refunded')),
+  subtotal       numeric(12,2) NOT NULL CHECK (subtotal &gt;= 0),
+  delivery_fee   numeric(12,2) NOT NULL DEFAULT 0,
+  discount       numeric(12,2) NOT NULL DEFAULT 0,
+  total          numeric(12,2) GENERATED ALWAYS AS (subtotal + delivery_fee - discount) STORED,
+  payment_method payment_method,
+  change_for     numeric(12,2) CHECK (change_for IS NULL OR change_for &gt;= 0),
+  machine_type   text CHECK (machine_type IN ('debit','credit')),
+  verification_deadline timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  -- dinheiro exige troco coerente; maquininha exige bandeira
+  CONSTRAINT cash_change_valid CHECK (
+    payment_method &lt;&gt; 'cash' OR change_for IS NULL OR change_for &gt;= subtotal),
+  CONSTRAINT machine_needs_type CHECK (
+    payment_method &lt;&gt; 'physical_machine' OR machine_type IS NOT NULL)
+);
+
+CREATE INDEX orders_kds_idx ON orders (restaurant_id, created_at DESC)
+  WHERE status IN ('paid','preparing','ready');
+CREATE INDEX orders_awaiting_idx ON orders (verification_deadline)
+  WHERE status = 'pending_verification';
+
+CREATE TABLE payments (
+  id              bigserial PRIMARY KEY,
+  order_id        bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  provider        text NOT NULL CHECK (provider IN ('mercadopago','bitpay','offline')),
+  provider_ref    text,
+  amount          numeric(12,2) NOT NULL CHECK (amount &gt; 0),
+  platform_fee    numeric(12,2) NOT NULL DEFAULT 0,
+  status          text NOT NULL CHECK (status IN
+                    ('created','in_process','approved','rejected','refunded','charged_back')),
+  status_detail   text,
+  raw_response    jsonb,          -- resposta crua: prova em disputa
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, provider_ref)
+);
+-- Regra de ouro: no máximo UM pagamento aprovado por pedido
+CREATE UNIQUE INDEX payments_one_approved ON payments (order_id)
+  WHERE status = 'approved';
+
+CREATE TABLE payment_proofs (
+  id            bigserial PRIMARY KEY,
+  order_id      bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  storage_key   text NOT NULL,             -- bucket privado, nunca webroot
+  sha256        char(64) NOT NULL,
+  phash         bigint,                    -- detecta reuso de print
+  bytes         int NOT NULL CHECK (bytes &lt;= 2097152),
+  mime          text NOT NULL CHECK (mime IN ('image/jpeg','image/png','image/webp')),
+  uploaded_ip   inet NOT NULL,
+  review        text NOT NULL DEFAULT 'pending'
+                  CHECK (review IN ('pending','approved','rejected')),
+  reviewed_by   uuid REFERENCES users(id),
+  reviewed_at   timestamptz,
+  reject_reason text,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX proofs_reuse_idx ON payment_proofs (sha256);
+
+CREATE TABLE order_events (           -- append-only: auditoria e tracking
+  id          bigserial PRIMARY KEY,
+  order_id    bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  from_status text,
+  to_status   text NOT NULL,
+  actor_id    uuid REFERENCES users(id),
+  actor_kind  text NOT NULL CHECK (actor_kind IN ('customer','restaurant','system','webhook')),
+  meta        jsonb NOT NULL DEFAULT '{}',
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE idempotency_keys (
+  key          uuid PRIMARY KEY,
+  endpoint     text NOT NULL,
+  request_hash char(64) NOT NULL,
+  state        text NOT NULL DEFAULT 'in_flight'
+                 CHECK (state IN ('in_flight','done')),
+  response     jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE outbox (                 -- eventos só existem se a transação commitou
+  id         bigserial PRIMARY KEY,
+  topic      text NOT NULL,
+  payload    jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  sent_at    timestamptz
+);
+CREATE INDEX outbox_pending ON outbox (id) WHERE sent_at IS NULL;</pre>
+<p style="font-size:11px;color:#8b8781;margin:0 0 18px;font-style:italic">Figura 1 — Migração 001. <code style="font-family:'IBM Plex Mono',monospace">users</code>, <code style="font-family:'IBM Plex Mono',monospace">order_items</code> e <code style="font-family:'IBM Plex Mono',monospace">fraud_attempts</code> seguem o mesmo padrão (uuid, timestamptz, numeric).</p>
+
+<pre style="break-inside:avoid;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:1.52;background:#f7f5f1;border:1px solid #e3e0d9;padding:12px 14px;margin:0 0 6px;white-space:pre-wrap">-- Transição de status com trava, auditoria e evento no mesmo commit
+CREATE OR REPLACE FUNCTION advance_order(
+  p_order bigint, p_to text, p_actor uuid, p_kind text, p_meta jsonb DEFAULT '{}'
+) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE v_from text;
+BEGIN
+  SELECT status INTO v_from FROM orders WHERE id = p_order FOR UPDATE;
+  IF v_from IS NULL THEN RAISE EXCEPTION 'pedido % inexistente', p_order; END IF;
+
+  IF NOT (v_from, p_to) IN (
+      ('cart','pending_payment'),
+      ('pending_payment','pending_verification'), ('pending_payment','paid'),
+      ('pending_payment','rejected'),  ('pending_payment','cancelled'),
+      ('pending_verification','paid'), ('pending_verification','rejected'),
+      ('pending_verification','cancelled'),
+      ('paid','preparing'), ('preparing','ready'),
+      ('ready','delivering'), ('delivering','delivered'),
+      ('paid','refunded'), ('delivered','refunded')
+  ) THEN
+    RAISE EXCEPTION 'transicao ilegal: % -> %', v_from, p_to;
+  END IF;
+
+  UPDATE orders SET status = p_to, updated_at = now() WHERE id = p_order;
+  INSERT INTO order_events(order_id, from_status, to_status, actor_id, actor_kind, meta)
+    VALUES (p_order, v_from, p_to, p_actor, p_kind, p_meta);
+  INSERT INTO outbox(topic, payload) VALUES (
+    'order.' || p_to,
+    jsonb_build_object('order_id', p_order, 'from', v_from, 'to', p_to));
+  PERFORM pg_notify('order_changed', p_order::text);
+  RETURN v_from;
+END $$;</pre>
+<p style="font-size:11px;color:#8b8781;margin:0 0 22px;font-style:italic">Figura 2 — Única porta de entrada para mudança de status. A cozinha (KDS) lê apenas <code style="font-family:'IBM Plex Mono',monospace">status IN ('paid','preparing')</code>, o que implementa em uma linha o princípio "cozinha só produz após aprovação".</p>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">4. Idempotência correta em <code style="font-family:'IBM Plex Mono',monospace;font-size:18px">datapaymentcard.php</code></h2>
+<p style="font-size:14.5px;line-height:1.62;margin:8px 0 12px;max-width:40em">Retry de rede é normal em 4G brasileiro. O contrato passa a ser: mesma chave + mesmo corpo devolve a <em>mesma resposta</em>; mesma chave + corpo diferente é 422; chave em voo é 409 com <code style="font-family:'IBM Plex Mono',monospace;font-size:12.5px">Retry-After</code>.</p>
+<pre style="break-inside:avoid;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:1.52;background:#f7f5f1;border:1px solid #e3e0d9;padding:12px 14px;margin:0 0 6px;white-space:pre-wrap">$key  = $_SERVER['HTTP_X_IDEMPOTENCY_KEY'] ?? '';
+$hash = hash('sha256', $rawBody);
+if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $key))
+    json_fail(400, 'X-Idempotency-Key deve ser UUID v4');
+
+$row = $pdo->prepare(
+  "INSERT INTO idempotency_keys (key, endpoint, request_hash)
+   VALUES (:k, 'datapaymentcard', :h)
+   ON CONFLICT (key) DO UPDATE SET key = idempotency_keys.key
+   RETURNING state, response, request_hash,
+             (xmax = 0) AS is_new");        -- xmax = 0 → inserção nova
+$row->execute([':k' => $key, ':h' => $hash]);
+$id = $row->fetch();
+
+if (!$id['is_new']) {
+    if (!hash_equals($id['request_hash'], $hash)) json_fail(422, 'Chave reutilizada com outro corpo');
+    if ($id['state'] === 'done') { echo $id['response']; exit; }   // 200 com a resposta original
+    header('Retry-After: 2'); json_fail(409, 'Pagamento em processamento');
+}
+// … cria payments(status='created'), chama a API, grava raw_response,
+//    chama advance_order(), e por fim:
+$pdo->prepare("UPDATE idempotency_keys SET state='done', response=:r WHERE key=:k")
+    ->execute([':r' => $json, ':k' => $key]);</pre>
+<p style="font-size:11px;color:#8b8781;margin:0 0 14px;font-style:italic">Figura 3 — O truque <code style="font-family:'IBM Plex Mono',monospace">xmax = 0</code> distingue inserção de conflito em uma só ida ao banco, sem corrida.</p>
+<div style="break-inside:avoid;background:#fdf6f6;border:1px solid #edd3d4;padding:12px 14px;font-size:12.5px;line-height:1.55;margin:0 0 24px">
+<strong>Correção de fato do v1:</strong> o card token do Mercado Pago é de <em>uso único</em> e vida curta — a regra "expira 7 dias" do cronograma original não deve ser usada como garantia. Se a chamada falhar por token consumido, o PWA precisa recriar o CardForm, não reenviar o mesmo token.
+</div>
+
+<h2 style="break-before:page;font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">5. Tempo real sem servidor extra: outbox + LISTEN/NOTIFY</h2>
+<pre style="break-inside:avoid;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:1.5;background:#f7f5f1;border:1px solid #e3e0d9;padding:12px 14px;margin:10px 0 6px;white-space:pre-wrap">PWA (cliente)            PHP + PostgreSQL                    Painel / KDS
+─────────────            ────────────────                    ────────────
+upload comprovante  ──►  BEGIN
+                         INSERT payment_proofs
+                         advance_order(... 'pending_verification')
+                           ├─ INSERT order_events   (auditoria)
+                           ├─ INSERT outbox         (entrega garantida)
+                           └─ pg_notify('order_changed')
+                         COMMIT  ──────────────────────────►  sse.php em LISTEN
+toast "em análise"  ◄──                                       toastr + som
+                                                              SweetAlert de revisão
+                    ◄──  advance_order(... 'paid')  ◄──────── [ Aprovar ]
+SSE: pagamento OK        pg_cron varre verification_deadline   KDS mostra o pedido
+                         com pg_try_advisory_lock</pre>
+<p style="font-size:11px;color:#8b8781;margin:0 0 12px;font-style:italic">Figura 4 — <code style="font-family:'IBM Plex Mono',monospace">NOTIFY</code> entrega o aviso instantâneo; a <code style="font-family:'IBM Plex Mono',monospace">outbox</code> garante que nada se perde se o painel estiver fechado. Rollback apaga os dois juntos.</p>
+<p style="font-size:14.5px;line-height:1.62;margin:0 0 22px;max-width:40em">Na Cloudflare, o endpoint SSE precisa de regra própria: <code style="font-family:'IBM Plex Mono',monospace;font-size:12.5px">Cache-Control: no-transform</code>, buffering desligado e exclusão do rate limiting — senão o painel do restaurante fica mudo justamente no horário de pico.</p>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">6. Operação do Postgres</h2>
+<table style="width:100%;border-collapse:collapse;font-size:12.5px;line-height:1.5;margin:10px 0 20px">
+<thead>
+<tr style="background:#f4f2ee">
+<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #d4d0c7;font-weight:600;width:22%">Item</th>
+<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #d4d0c7;font-weight:600">Configuração mínima de produção</th>
+</tr>
+</thead>
+<tbody>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Versão</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">PostgreSQL 16 · extensões <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pgcrypto</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">citext</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_cron</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_stat_statements</code></td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Conexões</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">PgBouncer em <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">transaction</code> para as APIs; pool <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">session</code> separado para o SSE, porque <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">LISTEN</code> exige sessão fixa</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Acesso</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Três roles: <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">app_rw</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">app_ro</code> (relatórios), <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">migrator</code>. RLS ligada em <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">orders</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">payments</code>, <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">payment_proofs</code> via <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">current_setting('app.restaurant_id')</code></td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Backup</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">WAL contínuo (pgBackRest) com PITR de 7 dias + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_dump</code> diário; restore testado por mês. Comprovantes versionados no bucket</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Migrações</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">SQL numerado e versionado (Phinx ou Atlas), sempre em transação, rodando pelo CI — não pelo cPanel</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">Vinda do MySQL</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0"><code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pgloader</code> para histórico + janela de escrita dupla; conferir <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">SUM(total)</code> por dia antes de virar a chave</td></tr>
+<tr><td style="padding:8px 10px;border-bottom:1px solid #eae7e0;font-weight:500">LGPD</td><td style="padding:8px 10px;border-bottom:1px solid #eae7e0">Comprovante e IP com retenção de 180 dias (job de expurgo); nunca armazenar PAN nem CVV — só o token e os 4 últimos dígitos</td></tr>
+</tbody>
+</table>
+
+<h2 style="font-family:'Newsreader',Georgia,serif;font-size:21px;font-weight:600;margin:0 0 4px;padding-top:4px;border-top:2px solid #1b1a18">7. Cronograma revisado (8 semanas)</h2>
+<p style="font-size:14.5px;line-height:1.62;margin:8px 0 12px;max-width:40em">Mesma duração do v1, com a semana 1 reorientada para a fundação de dados e a semana 8 reservada para reconciliação financeira — o teste que o plano original não tinha.</p>
+<table style="width:100%;border-collapse:collapse;font-size:12.5px;line-height:1.5;margin:0 0 20px">
+<thead>
+<tr style="background:#f4f2ee">
+<th style="text-align:left;padding:7px 10px;border-bottom:1px solid #d4d0c7;font-weight:600;width:14%">Semana</th>
+<th style="text-align:left;padding:7px 10px;border-bottom:1px solid #d4d0c7;font-weight:600">Entregável</th>
+<th style="text-align:left;padding:7px 10px;border-bottom:1px solid #d4d0c7;font-weight:600;width:30%">Critério de aceite</th>
+</tr>
+</thead>
+<tbody>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S1</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Postgres 16 + migrações 001–003 + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">advance_order</code> + PgBouncer + auth</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Teste de transição ilegal falha no banco</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S2</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Onboarding UF/cidade, home, catálogo, carrinho (store Svelte)</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Total do carrinho = <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">orders.total</code> gerado</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S3</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">CardForm + <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">datapaymentcard.php</code> + idempotência + webhook MP</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">100 retries = 1 cobrança (sandbox)</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S4</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Upload de comprovante, storage privado, marca d'água server-side, WAF</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">PHP disfarçado de .jpg é rejeitado</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S5</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Painel de aprovação + SSE + antifraude por <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">sha256</code>/<code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">phash</code></td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Aprovação dupla simultânea: 1 vence</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S6</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Dinheiro/troco, maquininha, ESC/POS, timeout por <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">pg_cron</code></td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Comanda impressa traz o troco em negrito</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S7</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Service worker, push, fidelidade, histórico, perfil</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Lighthouse PWA instalável ≥ 90</td></tr>
+<tr><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;font-weight:600">S8</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0">Reconciliação (extrato MP × <code style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">payments</code>), E2E, PITR restore, deploy</td><td style="padding:7px 10px;border-bottom:1px solid #eae7e0;color:#57534c">Divergência financeira = R$ 0,00</td></tr>
+</tbody>
+</table>
+
+<div style="break-inside:avoid;background:#f7f5f1;border:1px solid #e0ddd6;padding:14px 16px;margin:4px 0 0">
+<p style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#b4161d;margin:0 0 8px;font-weight:600">Próximos passos sugeridos</p>
+<p style="font-size:13.5px;line-height:1.6;margin:0;color:#3b3833">Posso seguir com (a) as migrações completas 001–003 como arquivos <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">.sql</code> versionados, (b) o <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">datapaymentcard.php</code> inteiro em PDO/Postgres com o webhook, ou (c) as telas do fluxo híbrido (seletor de pagamento, upload de comprovante e modal de aprovação) como protótipo navegável.</p>
+</div>
+</doc-page>
+</x-dc>
+</body>
+</html>
